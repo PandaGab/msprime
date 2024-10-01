@@ -126,6 +126,10 @@ def hk_f(n, z):
     return ret
 
 
+def chisquare_stat(observed, expected):
+    return np.sum((observed - expected) ** 2 / expected)
+
+
 def get_predicted_variance(n, R):
     # We import this here as it's _very_ slow to import and we
     # only use it in this case.
@@ -3431,12 +3435,14 @@ class BetaGrowth(XiGrowth):
         logging.debug(f"running Beta growth for {pop_size} {alpha} {growth_rate}")
         b = growth_rate * (alpha - 1)
         model = (msprime.BetaCoalescent(alpha=alpha),)
-        ploidy = 2
-        a = 1 / (2 * ploidy * self.compute_beta_timescale(pop_size, alpha, ploidy))
-        name = f"N={pop_size}_alpha={alpha}_growth_rate={growth_rate}_ploidy={ploidy}"
-        self.compare_tmrca(
-            pop_size, growth_rate, model, num_replicates, a, b, ploidy, name
-        )
+        for ploidy in range(2, 7):
+            a = 1 / (2 * ploidy * self.compute_beta_timescale(pop_size, alpha, ploidy))
+            name = (
+                f"N={pop_size}_alpha={alpha}_growth_rate={growth_rate}_ploidy={ploidy}"
+            )
+            self.compare_tmrca(
+                pop_size, growth_rate, model, num_replicates, a, b, ploidy, name
+            )
         ploidy = 1
         a = 1 / self.compute_beta_timescale(pop_size, alpha, ploidy)
         name = f"N={pop_size}_alpha={alpha}_growth_rate={growth_rate}_ploidy={ploidy}"
@@ -3474,12 +3480,14 @@ class BetaGrowth(XiGrowth):
 class DiracGrowth(XiGrowth):
     def _run(self, pop_size, c, psi, growth_rate, num_replicates=10000):
         logging.debug(f"running Dirac growth for {pop_size} {c} {psi} {growth_rate}")
-        b = growth_rate
+        b = 2 * growth_rate
         model = (msprime.DiracCoalescent(psi=psi, c=c),)
-        p = 2
-        a = (1 + c * psi * psi / (2 * p)) / (pop_size * pop_size)
-        name = f"N={pop_size}_c={c}_psi={psi}_growth_rate={growth_rate}_ploidy={p}"
-        self.compare_tmrca(pop_size, growth_rate, model, num_replicates, a, b, p, name)
+        for p in range(2, 7):
+            a = (1 + c * psi * psi / (2 * p)) / (pop_size * pop_size)
+            name = f"N={pop_size}_c={c}_psi={psi}_growth_rate={growth_rate}_ploidy={p}"
+            self.compare_tmrca(
+                pop_size, growth_rate, model, num_replicates, a, b, p, name
+            )
         p = 1
         a = (1 + c * psi * psi) / (pop_size * pop_size)
         name = f"N={pop_size}_c={c}_psi={psi}_growth_rate={growth_rate}_ploidy={p}"
@@ -5532,8 +5540,8 @@ class MutationTest(Test):
         for row, p in zip(transitions, transition_matrix):
             not_zeros = p > 0
             if sum(not_zeros) > 1:
-                chisq = scipy.stats.chisquare(row[not_zeros], p[not_zeros])
-                tm_chisq.append(chisq.statistic)
+                chisq = chisquare_stat(row[not_zeros], p[not_zeros])
+                tm_chisq.append(chisq)
             else:
                 tm_chisq.append(None)
 
@@ -5801,16 +5809,16 @@ class SeqGenTest(MutationTest):
             )
             # in Seq-Gen the ancestral sequence is determined first
             expected_num_ancestral_states_sg = root_distribution * num_sites
-            root_chisq_sg = scipy.stats.chisquare(
+            root_chisq_sg = chisquare_stat(
                 observed_ancestral_sg, expected_num_ancestral_states_sg
-            ).statistic
+            )
 
             tm_chisq_ts = self._transition_matrix_chi_sq(
                 observed_transitions_ts, expected_ts
             )
-            root_chisq_ts = scipy.stats.chisquare(
+            root_chisq_ts = chisquare_stat(
                 obs_ancestral_states_ts, expected_ancestral_states_ts
-            ).statistic
+            )
             ts_results["root_distribution"].append(root_chisq_ts)
             sg_results["root_distribution"].append(root_chisq_sg)
 
@@ -5988,17 +5996,17 @@ class PyvolveTest(MutationTest):
             )
 
             expected_num_ancestral_states_py = root_distribution * num_sites
-            root_chisq_py = scipy.stats.chisquare(
+            root_chisq_py = chisquare_stat(
                 observed_ancestral_py, expected_num_ancestral_states_py
-            ).statistic
+            )
 
             tm_chisq_ts = self._transition_matrix_chi_sq(
                 observed_transitions_ts, expected
             )
 
-            root_chisq_ts = scipy.stats.chisquare(
+            root_chisq_ts = chisquare_stat(
                 obs_ancestral_states_ts, expected_ancestral_states_ts
-            ).statistic
+            )
 
             c_ts = self.get_allele_counts(ts_mutated)
             pi_ts = allel.sequence_diversity(pos, c_ts)

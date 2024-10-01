@@ -1,4 +1,4 @@
-all: scrm ms msHOT slim seq-gen msms
+all: scrm ms msHOT slim seq-gen msms msprime-0.7.4
 
 seq-gen:
 	rm -fR seq-gen Seq-Gen* 1.3.4.tar.gz
@@ -9,12 +9,12 @@ seq-gen:
 
 slim:
 	rm -fR SLiM*
-	wget http://benhaller.com/slim/SLiM.zip
-	unzip SLiM.zip
-	mkdir SLiM/build
+	wget https://github.com/MesserLab/SLiM/archive/refs/tags/v3.7.1.tar.gz
+	tar -zxvf v3.7.1.tar.gz 
+	mkdir SLiM-3.7.1/build
 	# Arbitrarily using 4 threads to build here..
-	cd SLiM/build && cmake .. && make -j 4
-	cp SLiM/build/slim ./
+	cd SLiM-3.7.1/build && cmake .. && make -j 4
+	cp SLiM-3.7.1/build/slim ./
 
 scrm:
 	wget https://github.com/scrm/scrm/releases/download/v1.7.2/scrm-src.tar.gz
@@ -48,7 +48,7 @@ msms:
 
 msprime-0.7.4:
 	python3 -m venv msprime-0.7.4
-	bash -c "source msprime-0.7.4/bin/activate; pip install msprime==0.7.4"
+	bash -c "source msprime-0.7.4/bin/activate; pip install 'numpy<2' msprime==0.7.4"
 
 clean:
 	rm -fR scrm* ms ms_summary_stats msHOT msHOT_summary_stats sample_stats \

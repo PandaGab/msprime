@@ -131,7 +131,7 @@ class Segment:
     next: Segment = None  # noqa: A003
     lineage: Lineage = None
 
-    def __repr__(self):
+    def __str__(self):
         return repr((self.left, self.right, self.node))
 
     @staticmethod
@@ -931,7 +931,12 @@ class Simulator:
         # implemented using `ParametricAncestryModel()`
         self.hull_offset = hull_offset
 
-        self.initialise(tables.tree_sequence())
+        if model == "fixed_pedigree":
+            self.t = 0
+            self.S[0] = 0
+            self.S[self.L] = -1
+        else:
+            self.initialise(tables.tree_sequence())
 
         self.num_ca_events = 0
         self.num_re_events = 0
@@ -981,6 +986,7 @@ class Simulator:
         root_segments_tail = [None for _ in range(ts.num_nodes)]
         root_lineages = [None for _ in range(ts.num_nodes)]
         last_S = -1
+        start_time = np.inf
         for tree in ts.trees():
             left, right = tree.interval
             S = 0 if tree.num_roots == 1 else tree.num_roots
@@ -991,6 +997,7 @@ class Simulator:
             # any ancestral segments to the state.
             if tree.num_roots > 1:
                 for root in tree.roots:
+                    start_time = min(start_time, tree.time(root))
                     population = ts.node(root).population
                     if root_segments_head[root] is None:
                         seg = self.alloc_segment(left, right, root)
@@ -1014,7 +1021,7 @@ class Simulator:
         # Insert the segment chains into the algorithm state.
         for node in range(ts.num_nodes):
             lineage = root_lineages[node]
-            if lineage is not None:
+            if lineage is not None and ts.nodes_time[node] == start_time:
                 seg = lineage.head
                 left_end = seg.left
                 while seg is not None:
@@ -1115,6 +1122,11 @@ class Simulator:
 
     def alloc_lineage(self, head, population, *, label=0, tail=None):
         lineage = Lineage(head, population=population, label=label, tail=tail)
+        assert tail is None
+        # If we're allocating a new lineage for a given head segment, then we
+        # have no choice but to iterate over the rest of the chain to update
+        # the lineage reference, and determine the tail. If head is None,
+        # this doesn't do anything.
         lineage.reset_segments()
         return lineage
 
@@ -1611,6 +1623,16 @@ class Simulator:
         individual, then recombine and distribute the remaining ancestral
         material among its parent ploids.
         """
+        node = ind.nodes[ploid]
+        is_sample = (self.tables.nodes.flags[node] & tskit.NODE_IS_SAMPLE) > 0
+        if is_sample:
+            segment = self.alloc_segment(0, self.L, node)
+            lineage = self.alloc_lineage(segment, population=0)
+            self.add_lineage(lineage)
+            ind.add_common_ancestor(lineage.head, ploid=ploid)
+            for k in list(self.S.keys())[:-1]:
+                self.S[k] += 1
+
         common_ancestors = ind.common_ancestors[ploid]
         if len(common_ancestors) == 0:
             # No ancestral material inherited on this ploid of this individual
@@ -1627,7 +1649,6 @@ class Simulator:
         # monoploid genome for this ploid of this individual.
         # If any coalescences occur, they use the corresponding node ID.
         # FIXME update the population/label here
-        node = ind.nodes[ploid]
         genome = self.merge_ancestors(common_ancestors, 0, 0, node)
         if ind.parents[ploid] == tskit.NULL:
             # If this individual is a founder we need to make sure that all
@@ -1671,18 +1692,6 @@ class Simulator:
         Simulates transmission of ancestral material through a pre-specified
         pedigree
         """
-        assert self.num_populations == 1  # Single pop/pedigree for now
-        pop = self.P[0]
-
-        # Go through the extant lineages and gather the ancestral material
-        # into the corresponding pedigree individuals.
-        for lineage in pop.iter_ancestors():
-            u = lineage.head.node
-            node = self.tables.nodes[u]
-            assert node.individual != tskit.NULL
-            ind = self.pedigree.individuals[node.individual]
-            ind.add_common_ancestor(lineage.head, ploid=ind.nodes.index(u))
-
         # Visit pedigree individuals in time order.
         visit_order = sorted(self.pedigree.individuals, key=lambda x: (x.time, x.id))
         for ind in visit_order:
@@ -1690,6 +1699,7 @@ class Simulator:
             for ploid in range(ind.ploidy):
                 self.process_pedigree_common_ancestors(ind, ploid)
 
+    # TODO change to accept a lineage
     def store_arg_edges(self, segment, u=-1):
         if u == -1:
             u = len(self.tables.nodes) - 1
@@ -1997,6 +2007,7 @@ class Simulator:
         elif head is not None:
             new_individual_head = head
         if new_individual_head is not None:
+            # FIXME when doing the smc_k update
             lineage.reset_segments()
             new_lineage = self.alloc_lineage(new_individual_head, pop)
             if self.model == "smc_k":
@@ -2254,13 +2265,12 @@ class Simulator:
         return new_node_id
 
     def merge_ancestors(self, H, pop_id, label, new_node_id=-1):
-        pop = self.P[pop_id]
         defrag_required = False
         coalescence = False
         pass_through = len(H) == 1
         alpha = None
-        z = None
-        new_lineage = None
+        new_lineage = self.alloc_lineage(None, pop_id, label=label)
+
         while len(H) > 0:
             alpha = None
             left = H[0][0]
@@ -2321,10 +2331,15 @@ class Simulator:
 
             # loop tail; update alpha and integrate it into the state.
             if alpha is not None:
-                if z is None:
-                    new_lineage = self.alloc_lineage(alpha, pop_id)
-                    pop.add(new_lineage, label)
+                alpha.lineage = new_lineage
+                alpha.prev = new_lineage.tail
+                self.set_segment_mass(alpha)
+                if new_lineage.head is None:
+                    new_lineage.head = alpha
+                    assert new_lineage.tail is None
                 else:
+                    new_lineage.tail.next = alpha
+                    z = new_lineage.tail
                     if (coalescence and not self.coalescing_segments_only) or (
                         self.additional_nodes.value & msprime.NODE_IS_CA_EVENT > 0
                     ):
@@ -2333,38 +2348,18 @@ class Simulator:
                         defrag_required |= (
                             z.right == alpha.left and z.node == alpha.node
                         )
-                    z.next = alpha
-                alpha.prev = z
-                alpha.lineage = new_lineage
-                self.set_segment_mass(alpha)
-                z = alpha
-        if coalescence:
-            if not self.coalescing_segments_only:
-                self.store_arg_edges(z, new_node_id)
-        else:
-            if not pass_through:
-                if self.additional_nodes.value & msprime.NODE_IS_CA_EVENT > 0:
-                    new_node_id = self.store_additional_nodes_edges(
-                        msprime.NODE_IS_CA_EVENT, new_node_id, z
-                    )
-            else:
-                if self.additional_nodes.value & msprime.NODE_IS_PASS_THROUGH > 0:
-                    assert new_node_id != -1
-                    assert self.model == "fixed_pedigree"
-                    new_node_id = self.store_additional_nodes_edges(
-                        msprime.NODE_IS_PASS_THROUGH, new_node_id, z
-                    )
+                new_lineage.tail = alpha
 
-        if defrag_required:
-            self.defrag_segment_chain(z)
-        if coalescence:
-            self.defrag_breakpoints()
-        if new_lineage is not None:
-            # FIXME do this more efficiently!
-            new_lineage.reset_segments()
-        return new_lineage
+        return self.insert_merged_lineage(
+            new_lineage,
+            new_node_id,
+            coalescence=coalescence,
+            pass_through=pass_through,
+            defrag_required=defrag_required,
+        )
 
-    def defrag_segment_chain(self, z):
+    def defrag_segment_chain(self, lineage):
+        z = lineage.tail
         y = z
         while y.prev is not None:
             x = y.prev
@@ -2374,6 +2369,9 @@ class Simulator:
                 if y.next is not None:
                     y.next.prev = x
                 self.set_segment_mass(x)
+                if y == lineage.tail:
+                    lineage.tail = x
+                assert y != lineage.head
                 self.free_segment(y)
             y = x
 
@@ -2442,12 +2440,11 @@ class Simulator:
         self.merge_two_ancestors(population_index, label, x, y)
 
     def merge_two_ancestors(self, population_index, label, x, y, u=-1):
-        pop = self.P[population_index]
         self.num_ca_events += 1
-        z = None
-        new_lineage = None
+        new_lineage = self.alloc_lineage(None, population_index, label=label)
         coalescence = False
         defrag_required = False
+
         while x is not None or y is not None:
             alpha = None
             if x is None or y is None:
@@ -2476,8 +2473,7 @@ class Simulator:
                     if not coalescence:
                         coalescence = True
                         if u == -1:
-                            self.store_node(population_index)
-                            u = len(self.tables.nodes) - 1
+                            u = self.store_node(population_index)
                     # Put in breakpoints for the outer edges of the coalesced
                     # segment
                     left = x.left
@@ -2501,7 +2497,6 @@ class Simulator:
                             left=left,
                             right=right,
                             node=u,
-                            population=population_index,
                         )
                     if x.node != u:  # required for dtwf and fixed_pedigree
                         self.store_edge(left, right, u, x.node)
@@ -2521,11 +2516,15 @@ class Simulator:
 
             # loop tail; update alpha and integrate it into the state.
             if alpha is not None:
-                if z is None:
-                    new_lineage = self.alloc_lineage(
-                        alpha, population_index, label=label
-                    )
+                alpha.lineage = new_lineage
+                alpha.prev = new_lineage.tail
+                self.set_segment_mass(alpha)
+                if new_lineage.head is None:
+                    new_lineage.head = alpha
+                    assert new_lineage.tail is None
                 else:
+                    new_lineage.tail.next = alpha
+                    z = new_lineage.tail
                     if (coalescence and not self.coalescing_segments_only) or (
                         self.additional_nodes.value & msprime.NODE_IS_CA_EVENT > 0
                     ):
@@ -2534,42 +2533,62 @@ class Simulator:
                         defrag_required |= (
                             z.right == alpha.left and z.node == alpha.node
                         )
-                    z.next = alpha
-                alpha.prev = z
-                alpha.lineage = new_lineage
-                self.set_segment_mass(alpha)
-                z = alpha
+                new_lineage.tail = alpha
+
+        return self.insert_merged_lineage(
+            new_lineage, u, coalescence=coalescence, defrag_required=defrag_required
+        )
+
+    def insert_merged_lineage(
+        self, new_lineage, u, *, coalescence, defrag_required, pass_through=False
+    ):
+        z = new_lineage.tail
 
         if coalescence:
             if not self.coalescing_segments_only:
                 self.store_arg_edges(z, u)
         else:
-            if self.additional_nodes.value & msprime.NODE_IS_CA_EVENT > 0:
-                self.store_additional_nodes_edges(msprime.NODE_IS_CA_EVENT, u, z)
+            if not pass_through:
+                if self.additional_nodes.value & msprime.NODE_IS_CA_EVENT > 0:
+                    u = self.store_additional_nodes_edges(
+                        msprime.NODE_IS_CA_EVENT, u, z
+                    )
+            else:
+                if self.additional_nodes.value & msprime.NODE_IS_PASS_THROUGH > 0:
+                    assert u != -1
+                    assert self.model == "fixed_pedigree"
+                    u = self.store_additional_nodes_edges(
+                        msprime.NODE_IS_PASS_THROUGH, u, z
+                    )
 
         if defrag_required:
-            self.defrag_segment_chain(z)
+            self.defrag_segment_chain(new_lineage)
         if coalescence:
             self.defrag_breakpoints()
 
-        if new_lineage is not None:
-            x = new_lineage.head
-            # TODO do this more efficiently
+        if new_lineage.head is not None:
+            # Use up any uncoalesced segments at the end of the chain
+            x = new_lineage.tail.next
             while x is not None:
                 x.lineage = new_lineage
                 new_lineage.tail = x
                 x = x.next
+            # tail = new_lineage.tail
+            # new_lineage.reset_segments()
+            # assert tail == new_lineage.tail
             self.add_lineage(new_lineage)
 
-        if new_lineage is not None and self.model == "smc_k":
-            merged_head = new_lineage.head
-            assert merged_head.prev is None
-            hull = self.alloc_hull(merged_head.left, merged_head.right, new_lineage)
-            while merged_head is not None:
-                right = merged_head.right
-                merged_head = merged_head.next
-            hull.right = min(right + self.hull_offset, self.L)
-            pop.add_hull(label, hull)
+            if self.model == "smc_k":
+                merged_head = new_lineage.head
+                assert merged_head.prev is None
+                hull = self.alloc_hull(merged_head.left, merged_head.right, new_lineage)
+                while merged_head is not None:
+                    right = merged_head.right
+                    merged_head = merged_head.next
+                hull.right = min(right + self.hull_offset, self.L)
+                pop = self.P[new_lineage.population]
+                pop.add_hull(new_lineage.label, hull)
+        return new_lineage
 
     def print_state(self, verify=False):
         print("State @ time ", self.t)
@@ -2640,6 +2659,7 @@ class Simulator:
         for pop_index, pop in enumerate(self.P):
             for label in range(self.num_labels):
                 for lineage in pop.iter_label(label):
+                    # print("LIN", lineage)
                     assert isinstance(lineage, Lineage)
                     assert lineage.label == label
                     assert lineage.population == pop_index
