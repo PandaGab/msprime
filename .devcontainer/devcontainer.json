@@ -16,7 +16,7 @@
   "mounts": [
     "type=bind,source=${localEnv:HOME}/.ssh,target=/root/.ssh,readonly"
   ],
-  "postCreateCommand": "uv venv venv && uv pip install --python venv/bin/python --link-mode=copy -r requirements/development.txt && venv/bin/python setup.py build_ext --inplace && venv/bin/pre-commit install --install-hooks",
+  "postCreateCommand": "uv venv venv && uv pip install --python venv/bin/python --link-mode=copy -r requirements/development.txt -r requirements.local.txt && venv/bin/python setup.py build_ext --inplace && venv/bin/pre-commit install --install-hooks",
   "customizations": {
     "vscode": {
       "extensions": [
